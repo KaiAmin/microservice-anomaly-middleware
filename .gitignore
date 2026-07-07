@@ -1,0 +1,19 @@
+# Données générées (régénérées à chaque run, pas besoin de versionner)
+raw_logs.json
+labels.json
+traces_grouped.json
+anomaly_scores.json
+anomaly_scores_logbert.json
+output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Claude Code internal state
+.claude/
