@@ -15,13 +15,14 @@ QUASIMENT AUCUN dataset public de logs (même DeepTraLog n'étiquette que la
 trace entière comme anormale, pas le chemin de cause à effet). Ici, on peut
 entraîner un vrai GNN UNIQUEMENT parce qu'on est nous-mêmes les générateurs
 des données synthétiques (step1_generate_logs.py) : on CONNAÎT la vérité
-terrain injectée (Inventory = source du stress via les Retry, Shipping =
-victime de la propagation via le Timeout). C'est exactement le verrou
-scientifique identifié : en conditions réelles, ce label n'est disponible
-que via des campagnes de chaos engineering / injection de fautes contrôlées
-avec traçage de l'origine exacte de la panne — ce qui n'existe pas "sur
-étagère". Ce script prouve la FAISABILITÉ TECHNIQUE (un GAT entraîné, rapide,
-qui généralise sur un split train/test), pas que le problème des labels est
+terrain injectée, lue depuis stress_labels.json (deux types d'anomalies
+désormais : "cascade" -> Inventory+Shipping stressés, "contained" -> Order
+seul stressé, pas de propagation). C'est exactement le verrou scientifique
+identifié : en conditions réelles, ce label n'est disponible que via des
+campagnes de chaos engineering / injection de fautes contrôlées avec
+traçage de l'origine exacte de la panne — ce qui n'existe pas "sur étagère".
+Ce script prouve la FAISABILITÉ TECHNIQUE (un GAT entraîné, rapide, qui
+généralise sur un split train/test), pas que le problème des labels est
 résolu.
 """
 import json
@@ -43,23 +44,26 @@ SERVICES = ["Gateway", "Order", "Payment", "Inventory", "Shipping"]
 SVC_IDX = {s: i for i, s in enumerate(SERVICES)}
 N_NODES = len(SERVICES)
 
-# vérité terrain connue UNIQUEMENT parce qu'on a généré les données (step1) :
-# Inventory = source du stress (Retry), Shipping = victime de la propagation (Timeout).
-STRESSED_SERVICES_IF_ANOMALOUS = {"Inventory", "Shipping"}
-
 N_EPOCHS_GNN = 150
 TRAIN_RATIO = 0.8
 
 
 def build_adjacency():
-    """Graphe de dépendance causal (Gateway->...->Shipping), + sens inverse pour le
-    message-passing, + self-loops. Le GAT apprend LUI-MÊME (via l'attention) quel
-    sens de propagation compte, on ne lui impose pas de règle de décroissance."""
+    """Graphe de dépendance causal (Gateway->...->Shipping), SENS UNIQUE aval
+    (adj[receveur, émetteur]) + self-loops.
+
+    Historique : la première version utilisait des arêtes bidirectionnelles
+    (le GAT recevait aussi des messages en sens inverse, amont<-aval). Ça
+    causait une fuite de stress : le stress d'Order (panne "contenue")
+    remontait vers Gateway par message-passing, alors que Gateway n'est
+    jamais réellement affecté. En sens unique (aval uniquement, cohérent
+    avec la direction réelle de propagation d'une panne), un nœud ne peut
+    plus "recevoir" le stress de son prédécesseur causal — seulement le
+    transmettre à son successeur."""
     adj = torch.zeros(N_NODES, N_NODES, dtype=torch.bool)
     causal_edges = [(0, 1), (1, 2), (2, 3), (3, 4)]  # Gateway->Order->Payment->Inventory->Shipping
     for a, b in causal_edges:
-        adj[a, b] = True
-        adj[b, a] = True
+        adj[b, a] = True  # b (aval) reçoit de a (amont) — sens causal uniquement
     for i in range(N_NODES):
         adj[i, i] = True
     return adj
@@ -84,10 +88,11 @@ def per_position_surprise(model, logs, vocab, max_len):
     return surprises
 
 
-def build_node_features(traces, labels, bert_model, vocab, max_len):
+def build_node_features(traces, labels, stress_labels, bert_model, vocab, max_len):
     """Pour chaque trace, calcule un vecteur de features par service :
     [surprise sémantique moyenne, nb de logs ERROR/Retry, nb de logs] et le label
-    binaire "stressé" (vérité terrain connue car on a généré les données)."""
+    binaire "stressé" (vérité terrain connue car on a généré les données, lue
+    depuis stress_labels.json — varie selon le type d'anomalie de la trace)."""
     features, node_labels = {}, {}
     for tid, logs in traces.items():
         surprises = per_position_surprise(bert_model, logs, vocab, max_len)
@@ -101,13 +106,13 @@ def build_node_features(traces, labels, bert_model, vocab, max_len):
 
         feat = torch.zeros(N_NODES, 3)
         lab = torch.zeros(N_NODES)
-        is_anomalous = labels[tid] == 1
+        stressed = set(stress_labels.get(tid, []))
         for svc, idx in SVC_IDX.items():
             s = per_svc[svc]["surprise"]
             feat[idx, 0] = sum(s) / len(s) if s else 0.0
             feat[idx, 1] = per_svc[svc]["errors"]
             feat[idx, 2] = per_svc[svc]["count"]
-            if is_anomalous and svc in STRESSED_SERVICES_IF_ANOMALOUS:
+            if svc in stressed:
                 lab[idx] = 1.0
         features[tid] = feat
         node_labels[tid] = lab
@@ -201,6 +206,8 @@ if __name__ == "__main__":
         logs = json.load(f)
     with open("labels.json") as f:
         labels = json.load(f)
+    with open("stress_labels.json") as f:
+        stress_labels = json.load(f)
 
     traces = parse_and_group(logs)
     vocab = build_vocab(traces)
@@ -211,7 +218,7 @@ if __name__ == "__main__":
     bert_model = train_logbert(traces, labels, vocab, max_len)
 
     print("\nConstruction des features par service/trace (surprise LogBERT + erreurs/retry)...")
-    features, node_labels = build_node_features(traces, labels, bert_model, vocab, max_len)
+    features, node_labels = build_node_features(traces, labels, stress_labels, bert_model, vocab, max_len)
 
     all_ids = list(traces.keys())
     random.shuffle(all_ids)

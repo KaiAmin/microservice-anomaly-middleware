@@ -1,6 +1,8 @@
 # Données générées (régénérées à chaque run, pas besoin de versionner)
 raw_logs.json
 labels.json
+stress_labels.json
+anomaly_types.json
 traces_grouped.json
 anomaly_scores.json
 anomaly_scores_logbert.json

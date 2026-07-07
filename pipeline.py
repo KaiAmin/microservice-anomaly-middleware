@@ -37,16 +37,24 @@ def run_pipeline(regenerate_data=True, live=False):
 
     if regenerate_data or not os.path.exists("raw_logs.json"):
         print("[0/4] Génération des logs synthétiques...")
-        logs, labels = build_dataset()
+        logs, labels, stress_labels, anomaly_types = build_dataset()
         with open("raw_logs.json", "w") as f:
             json.dump(logs, f)
         with open("labels.json", "w") as f:
             json.dump(labels, f)
+        with open("stress_labels.json", "w") as f:
+            json.dump(stress_labels, f)
+        with open("anomaly_types.json", "w") as f:
+            json.dump(anomaly_types, f)
     else:
         with open("raw_logs.json") as f:
             logs = json.load(f)
         with open("labels.json") as f:
             labels = json.load(f)
+        with open("stress_labels.json") as f:
+            stress_labels = json.load(f)
+        with open("anomaly_types.json") as f:
+            anomaly_types = json.load(f)
 
     print("[1/4] Ingestion + trace-grouping...")
     traces = parse_and_group(logs)
@@ -59,7 +67,7 @@ def run_pipeline(regenerate_data=True, live=False):
 
     print("[3/4] Entraînement du GAT (couche topologique, Graph Attention Network)...")
     adj = build_adjacency()
-    features, node_labels = build_node_features(traces, labels, bert_model, vocab, max_len)
+    features, node_labels = build_node_features(traces, labels, stress_labels, bert_model, vocab, max_len)
     all_ids = list(traces.keys())
     random.shuffle(all_ids)
     split = int(len(all_ids) * 0.8)
@@ -86,6 +94,7 @@ def run_pipeline(regenerate_data=True, live=False):
                 "trace_id": tid,
                 "timestamp": time.time(),
                 "ground_truth_label": labels[tid],
+                "anomaly_type": anomaly_types[tid],
                 "semantic_score": round(score, 4),
                 "semantic_detected": len(flagged) > 0,
                 "semantic_latency_ms": round(semantic_latency_ms, 4),
